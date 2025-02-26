@@ -3,7 +3,7 @@
 const router = require("express").Router();
 
 // controllers
-const { getCanadaPostRates, test, getUSPSRates } = require("../controllers/getShippingRates");
+const { getCanadaPostRates, test, getUSPSRates } = require("../controllers/shippingRates");
 
 
 router.get("/test" , test);

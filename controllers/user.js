@@ -6,8 +6,10 @@ const bcrypt = require("bcryptjs");
 const User = require("../models/User");
 
 const generateToken = (id) => {
-  return jwt.sign({ id }, process.env.JWT_SECRET, { expiresIn: "30d" });
+  return jwt.sign({ id }, process.env.JWT_SECRET);
 };
+
+
 
 module.exports.test = (req, res) => {
   return res.status(200).json({
@@ -22,10 +24,10 @@ module.exports.test = (req, res) => {
  */
 
 module.exports.register = async (req, res) => {
-    const { name, email, password, bankDetails } = req.body;
+    const { name, email, password } = req.body;
   try {
 
-    if (!name || !email || !password || !bankDetails) {
+    if (!name || !email || !password ) {
       return res.status(400).json({ error: "All fields are required." });
     }
 
@@ -33,8 +35,6 @@ module.exports.register = async (req, res) => {
     if (existingUser) {
       return res.status(400).json({ message: "Email already registered" });
     }
-
-
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Create new seller
@@ -42,11 +42,7 @@ module.exports.register = async (req, res) => {
       name,
       email,
       password: hashedPassword,
-      bankDetails: {
-        accountNumber: bankDetails.accountNumber,
-        bankName: bankDetails.bankName,
-        routingNumber: bankDetails.routingNumber,
-      },
+    
     });
 
     return res.status(201).json({ message: "User registered successfully!" });
@@ -108,3 +104,6 @@ module.exports.login = async (req, res) => {
     });
   }
 };
+
+
+
