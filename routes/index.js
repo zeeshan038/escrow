@@ -2,15 +2,16 @@
 const router = require("express").Router();
 
 // routes
-const paymet = require("./stripeMongo");
 const rates = require("./shippingRates")
-const user = require("./user")
 const stripe = require("./stripe")
+const orders = require("./orders")
+const seller = require("./seller")
 
-router.use("/payment", paymet);
+
 router.use("/rates" , rates);
-router.use("/user" , user);
-router.use("/stripe" , stripe)
+router.use("/stripe", stripe);
+router.use("/orders", orders);
+router.use("/seller" , seller)
 
 module.exports = router;
 

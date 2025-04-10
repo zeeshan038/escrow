@@ -1,25 +1,22 @@
 //NPM Packages
-const paypal = require("paypal-rest-sdk");
 const dotenv = require("dotenv");
 dotenv.config();
+
 //Stripe
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
+
 //firebase
 const { admin, db } = require("../config/firebase");
 
-// paypal configuration
-paypal.configure({
-  mode: "sandbox",
-  client_id: process.env.PAYPAL_CLIENT_ID ,
-  client_secret: process.env.PAYPAL_CLIENT_SECRET,
-});
+// utils
+const sendNotification = require("../utils/sendNotification");
+const { generateShortOrderId } = require("../utils/methods");
 
 /**
    @description creating stripe customer
    @route POST /api/stripe/create-customer
    @access Private
  */
-
 module.exports.createCustomer = async (req, res) => {
   const { email, uid } = req.body;
 
@@ -90,7 +87,6 @@ module.exports.addTestCard = async (req, res) => {
    @route POST /api/stripe/create-setup-intent
    @access Private
  */
-
 module.exports.createSetupIntent = async (req, res) => {
   const { customerId } = req.body;
 
@@ -137,7 +133,7 @@ module.exports.getCards = async (req, res) => {
 
     res.status(200).json({
       status: true,
-      data: paymentMethods.data,
+      data: paymentMethods,
     });
   } catch (error) {
     return res.status(500).json({
@@ -148,20 +144,33 @@ module.exports.getCards = async (req, res) => {
 };
 
 /**
-   @description charge card
+   @description charging card and the ordder be created
    @route POST /api/stripe/charge-card
    @access Private
  */
 module.exports.chargeCard = async (req, res) => {
-  const { buyerId, sellerId, amount, paymentMethodId } = req.body;
+  const {
+    firstName,
+    lastName,
+    email,
+    phoneNo,
+    additionalDetails,
+    amount,
+    buyerId,
+    sellerId,
+    adId,
+    shippingMethod,
+    shippingPrice,
+    lat,
+    long,
+  } = req.body;
 
   try {
-    if (amount <= 0) {
-      return res.status(400).json({ error: "Invalid amount" });
+    if (!buyerId || !sellerId || !amount || !adId) {
+      return res.status(400).json({ error: "Missing required fields" });
     }
 
-
-    const buyerRef = db.collection("users").doc(buyerId);
+    const buyerRef = admin.firestore().collection("users").doc(buyerId);
     const buyerDoc = await buyerRef.get();
 
     if (!buyerDoc.exists) {
@@ -169,45 +178,129 @@ module.exports.chargeCard = async (req, res) => {
     }
 
     const stripeCustomerId = buyerDoc.data().stripeCustomerId;
+    if (!stripeCustomerId) {
+      return res
+        .status(400)
+        .json({ error: "Buyer has no saved payment method" });
+    }
 
-    // Fetch seller details
-    const sellerRef = db.collection("users").doc(sellerId);
+    const sellerRef = admin.firestore().collection("users").doc(sellerId);
     const sellerDoc = await sellerRef.get();
 
     if (!sellerDoc.exists) {
       return res.status(404).json({ error: "Seller not found" });
     }
 
-    const orderRef = db.collection("orders").doc();
-    const orderId = orderRef.id;
-
-    const paymentIntent = await stripe.paymentIntents.create({
-      amount: amount * 100, 
-      currency: "usd",
-      payment_method: paymentMethodId,
+    const paymentMethods = await stripe.paymentMethods.list({
       customer: stripeCustomerId,
-      confirm: true, 
-      return_url: "https://yourwebsite.com/payment-success",
-      capture_method: "manual", 
+      type: "card",
     });
 
+    if (paymentMethods.data.length === 0) {
+      return res.status(400).json({ error: "No saved payment method found" });
+    }
+
+    const paymentMethodId = paymentMethods.data[0].id;
+
+    // Create PaymentIntent (not confirmed yet)
+    const paymentIntent = await stripe.paymentIntents.create({
+      amount: amount * 100,
+      currency: "usd",
+      customer: stripeCustomerId,
+      payment_method: paymentMethodId,
+      confirm: false, // Do not confirm yet
+      capture_method: "manual", // Hold funds in escrow
+      transfer_group: `order_${buyerId}_${adId}`,
+      automatic_payment_methods: {
+        enabled: true, // Enable automatic payment methods
+        allow_redirects: "never",
+      },
+    });
+
+    // Save order data to Firestore
+    const orderRef = admin.firestore().collection("orders").doc();
     await orderRef.set({
-      orderId,
+      firstName,
+      lastName,
+      email,
+      phoneNo,
+      additionalDetails,
+      amount,
       buyerId,
       sellerId,
-      amount,
+      adId,
+      shippingMethod,
+      shippingPrice,
+      lat,
+      long,
       paymentIntentId: paymentIntent.id,
-      status: "held", 
+      status: "pending", // Set to pending until payment is confirmed and captured
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
     res.status(200).json({
-      message: "Payment held in escrow",
-      orderId,
-      paymentIntentId: paymentIntent.id, 
+      message: "Payment Intent created, awaiting confirmation",
+      orderId: orderRef.id,
+      paymentIntentId: paymentIntent.id,
+      client_secret: paymentIntent.client_secret, // Send this to the client for payment confirmation
     });
   } catch (error) {
     console.error("Payment Error:", error);
+    res.status(500).json({ error: error.message });
+  }
+};
+
+/**
+   @description charging card and the ordder be created
+   @route POST /api/stripe/charge-card
+   @access Private
+ */
+module.exports.confirmPayment = async (req, res) => {
+  const { paymentIntentId } = req.body;
+
+  try {
+    const orderRef = admin
+      .firestore()
+      .collection("orders")
+      .where("paymentIntentId", "==", paymentIntentId);
+    const orderSnapshot = await orderRef.get();
+
+    if (orderSnapshot.empty) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+
+    const orderDoc = orderSnapshot.docs[0];
+    const orderData = orderDoc.data();
+
+    const paymentIntent = await stripe.paymentIntents.confirm(paymentIntentId);
+
+    if (paymentIntent.status !== "requires_capture") {
+      return res
+        .status(400)
+        .json({ error: "Payment failed or not ready for capture" });
+    }
+
+    await stripe.paymentIntents.capture(paymentIntentId);
+    await orderDoc.ref.update({
+      status: "held",
+      capturedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+
+    const sellerPushToken = orderData.sellerPushToken;
+    if (sellerPushToken) {
+      await sendNotification(
+        sellerPushToken,
+        "Order Paid Successfully! 💰",
+        `The payment of $${orderData.amount} for order ${orderData.id} has been successfully captured.`
+      );
+    }
+
+    res.status(200).json({
+      status: true,
+      message: "Payment successful, order confirmed",
+    });
+  } catch (error) {
+    console.error("Error confirming payment:", error);
     res.status(500).json({ error: error.message });
   }
 };
@@ -219,7 +312,12 @@ module.exports.chargeCard = async (req, res) => {
  */
 
 module.exports.releasePayment = async (req, res) => {
-  const { orderId, paypalEmail } = req.body;
+  const staticStripeConnectId = "acct_1Qz3k6PFPFCRQouh";
+  console.log("🔥 Using Static Stripe Connect ID:", staticStripeConnectId);
+
+  const account = await stripe.accounts.retrieve(staticStripeConnectId);
+  console.log("🔥 Retrieved Stripe Account:", account);
+  const { orderId } = req.body;
   const COMMISSION_RATE = 0.05;
 
   try {
@@ -227,54 +325,49 @@ module.exports.releasePayment = async (req, res) => {
     const orderDoc = await orderRef.get();
 
     if (!orderDoc.exists || orderDoc.data().status !== "held") {
-      return res.status(400).json({ error: "Already processed order" });
+      return res
+        .status(400)
+        .json({ error: "Order not found or already processed" });
     }
-
     const order = orderDoc.data();
-    await stripe.paymentIntents.capture(order.paymentIntentId);
+    const sellerId = order.sellerId;
+    const paymentIntentId = order.paymentIntentId;
 
-    const commission = order.amount * COMMISSION_RATE;
+    const sellerRef = db.collection("users").doc(sellerId);
+    const sellerDoc = await sellerRef.get();
+
+    await stripe.paymentIntents.capture(paymentIntentId);
+
+    // calculate commission
+    const commission = Math.round(order.amount * COMMISSION_RATE);
     const sellerEarnings = order.amount - commission;
 
-    // PayPal Payout Data
-    const payoutData = {
-      sender_batch_header: {
-        email_subject: "You have received a payout!",
-      },
-      items: [
-        {
-          recipient_type: "EMAIL",
-          amount: { value: sellerEarnings, currency: "USD" },
-          receiver: paypalEmail,
-          note: "Payment for your order",
-          sender_item_id: `PAYOUT_${Date.now()}`,
-        },
-      ],
-    };
+    const transfer = await stripe.transfers.create({
+      amount: sellerEarnings * 100,
+      currency: "usd",
+      destination: "acct_1Qz3k6PFPFCRQouh",
+      transfer_group: `order_${order.buyerId}_${order.adId}`,
+    });
 
-    // Send PayPal Payout
-    paypal.payout.create(payoutData, async (error, payout) => {
-      if (error) {
-        console.error("PayPal Payout Error:", error);
-        return res.status(500).json({ error: "PayPal Payout failed" });
-      }
+    // Update order status in Firestore
+    await orderRef.update({
+      status: "completed",
+      transferId: transfer.id,
+      commissionDeducted: commission,
+      finalAmount: sellerEarnings,
+      completedAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
 
-      await orderRef.update({ status: "completed" });
-
-      res.status(200).json({
-        message: "Funds sent to seller's PayPal after commission deduction",
-        payoutId: payout.batch_header.payout_batch_id,
-        commissionDeducted: commission,
-        finalAmount: sellerEarnings,
-      });
+    res.status(200).json({
+      message: "Funds released to seller's Stripe Connect account",
+      transferId: transfer.id,
+      commissionDeducted: commission,
+      finalAmount: sellerEarnings,
     });
   } catch (error) {
-    console.error("Release Payment Error:", error);
-    res.status(500).json({ error: error.message });
+    res.status(500).json({ error: error });
   }
 };
-
-
 
 /**
    @description dispute order
@@ -282,96 +375,55 @@ module.exports.releasePayment = async (req, res) => {
    @access Private
  */
 
-module.exports.dispute = async (req , res)=>{
-    const { orderId, buyerId, reason } = req.body;
-
-    try {
-      const orderRef = db.collection("orders").doc(orderId);
-      const orderDoc = await orderRef.get();
-  
-      if (!orderDoc.exists) {
-        return res.status(404).json({ error: "Order not found" });
-      }
-  
-      const orderData = orderDoc.data();
-      if (orderData.status === "completed") {
-        return res.status(400).json({ error: "Cannot dispute a completed order" });
-      }
-
-      await orderRef.update({ status: "dispute" });
-      await db.collection("disputes").doc(orderId).set({
-        orderId,
-        buyerId,
-        sellerId: orderData.sellerId,
-        amount: orderData.amount,
-        paymentIntentId: orderData.paymentIntentId,
-        reason,
-        status: "dispute",
-        createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      });
-  
-      res.status(200).json({
-        message: "Dispute raised successfully"
-      });
-  
-    } catch (error) {
-      console.error("Dispute Error:", error);
-      res.status(500).json({ error: error.message });
-    }
-}
-
-/**
-   @description withdraw to paypal
-   @route POST /api/payment/withdraw-to-paypal
-   @access Private
- */
-
-module.exports.withdrawToPayPal = async (req, res) => {
-  const { sellerId, amount, paypalEmail } = req.body;
+module.exports.dispute = async (req, res) => {
+  const { orderId, buyerId, reason, vidUrl } = req.body;
 
   try {
-    const walletRef = db.collection("wallets").doc(sellerId);
-    const walletDoc = await walletRef.get();
-
-    if (!walletDoc.exists || walletDoc.data().balance < amount) {
-      return res.status(400).json({ error: "Insufficient funds" });
+    const orderRef = db.collection("orders").doc(orderId);
+    const orderDoc = await orderRef.get();
+    if (!orderDoc.exists) {
+      return res.status(404).json({ error: "Order not found" });
+    }
+    const orderData = orderDoc.data();
+    if (orderData.status === "completed") {
+      return res
+        .status(400)
+        .json({ error: "Cannot dispute a completed order" });
     }
 
-    // PayPal Payout Data
-    const payoutData = {
-      sender_batch_header: {
-        email_subject: "You have received a payout!",
-      },
-      items: [
-        {
-          recipient_type: "EMAIL",
-          amount: { value: amount, currency: "USD" },
-          receiver: paypalEmail,
-          note: "Withdrawal from your account",
-          sender_item_id: `PAYOUT_${Date.now()}`,
-        },
-      ],
-    };
+    const sellerRef = db.collection("users").doc(orderData.sellerId);
+    const sellerDoc = await sellerRef.get();
 
-    // Send PayPal Payout
-    paypal.payout.create(payoutData, async (error, payout) => {
-      if (error) {
-        console.error(error);
-        return res.status(500).json({ error: "PayPal Payout failed" });
-      }
-
-      // Deduct balance
-      await walletRef.update({
-        balance: admin.firestore.FieldValue.increment(-amount),
-      });
-
-      res.status(200).json({
-        message: "Withdrawal successful!",
-        payoutId: payout.batch_header.payout_batch_id,
-        balance: walletDoc.data().balance - amount,
-      });
+    if (!sellerDoc.exists) {
+      return res.status(404).json({ error: "Seller not found" });
+    }
+    await orderRef.update({ status: "dispute" });
+    await db.collection("disputes").doc(orderId).set({
+      orderId,
+      buyerId,
+      sellerId: orderData.sellerId,
+      amount: orderData.amount,
+      paymentIntentId: orderData.paymentIntentId,
+      reason,
+      vidUrl,
+      status: "dispute",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    });
+    // sending notification to seller when buyer makes an order
+    const sellerPushToken = sellerDoc.data().pushToken;
+    console.log("token", sellerPushToken);
+    if (sellerPushToken) {
+      await sendNotification(
+        sellerPushToken,
+        "📢 Dispute Submitted!",
+        `Your dispute for the order worth ${orderData.amount} has been submitted.`
+      );
+    }
+    res.status(200).json({
+      message: "Dispute raised successfully",
     });
   } catch (error) {
+    console.error("Dispute Error:", error);
     res.status(500).json({ error: error.message });
   }
 };

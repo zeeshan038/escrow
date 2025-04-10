@@ -166,3 +166,107 @@ module.exports.getUSPSRates = async (req, res) => {
  * @route POST /api/rates/get-rates-ups
  * @access Private
  */
+const clientId = "oRRNjGUFASXDetUR6484OoUdsKR58OsC2VUW36CYFUexFd87";
+const clientSecret = "rGeTj7l02TpMzJBQIGMPzlQi2xXLxLmBaGX9IGENW7TJZSfwXoST0S7DALx4ZjAM"
+
+// Get Access Token from UPS
+const getUPSToken = async () => {
+  try {
+    const response = await axios.post(
+      "https://wwwcie.ups.com/security/v1/oauth/token",
+      new URLSearchParams({ grant_type: "client_credentials" }).toString(),
+      {
+        headers: {
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        auth: {
+          username: clientId,
+          password: clientSecret,
+        },
+      }
+    );
+
+    return response.data.access_token;
+  } catch (error) {
+    console.error("Token Error:", error.response?.data || error.message);
+    throw error;
+  }
+};
+
+// Main function to export
+module.exports.getUPSRates = async (req, res) => {
+  console.log("Request body:", req.body); // Check the raw body coming from the client
+
+  const { origin, destination, weight } = req.body;
+  console.log("Origin:", origin, "Destination:", destination, "Weight:", weight);
+
+  try {
+    if (!origin || !destination || !weight) {
+      return res.status(400).json({
+        error: "origin, destination, and weight are required",
+      });
+    }
+
+    const token = await getUPSToken();
+    console.log("Access Token:", token);
+
+    const rateResponse = await axios.post(
+      "https://wwwcie.ups.com/api/rating/v2205/Rate",
+      {
+        RateRequest: {
+          Request: {
+            RequestOption: "Rate",
+            TransactionReference: {
+              CustomerContext: "Get UPS shipping rates",
+            },
+          },
+          Shipment: {
+            Shipper: {
+              Address: {
+                PostalCode: origin,
+                CountryCode: "US",
+              },
+            },
+            ShipTo: {
+              Address: {
+                PostalCode: destination,
+                CountryCode: "US",
+              },
+            },
+            ShipFrom: {
+              Address: {
+                PostalCode: origin,
+                CountryCode: "US",
+              },
+            },
+            Package: {
+              PackagingType: {
+                Code: "02", // Customer Supplied Package
+              },
+              PackageWeight: {
+                UnitOfMeasurement: {
+                  Code: "LBS",
+                },
+                Weight: weight,
+              },
+            },
+          },
+        },
+      },
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+      }
+    );
+
+    res.status(200).json(rateResponse.data);
+  } catch (error) {
+    console.error("UPS Rate Error:", error.response?.data || error.message);
+    res.status(500).json({
+      error: "Failed to fetch UPS shipping rates",
+      details: error.response?.data || error.message,
+    });
+  }
+};
