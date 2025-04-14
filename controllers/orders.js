@@ -1,3 +1,6 @@
+// utils
+const sendNotification = require("../utils/sendNotification");
+
 //firebase
 const { db } = require("../config/firebase");
 
@@ -31,7 +34,7 @@ module.exports.getOrders = async (req, res) => {
         message: "Invalid type. Use 'buyer' or 'seller'.",
       });
     }
-    
+
     // Filter by Status
     if (status) {
       query = query.where("status", "==", status);
@@ -191,6 +194,201 @@ module.exports.getSpecificOrder = async (req, res) => {
     return res.status(500).json({
       status: false,
       error: error.message,
+    });
+  }
+};
+
+/**
+ @description ship the ordder
+ @route  GET /api/order/order/:id
+ @Access Private
+ */
+module.exports.orderShipped = async (req, res) => {
+  const { orderId } = req.params;
+
+  try {
+    if (!orderId) {
+      return res.status(400).json({
+        status: false,
+        message: "Order ID is required",
+      });
+    }
+
+    const orderRef = db.collection("orders").doc(orderId);
+    const orderSnap = await orderRef.get();
+
+    if (!orderSnap.exists) {
+      return res.status(404).json({
+        status: false,
+        message: "Order not found",
+      });
+    }
+
+    const orderData = orderSnap.data();
+
+    // Update the order status to "shipped"
+    await orderRef.update({
+      status: "shipped",
+    });
+
+    // Send notification to the buyer
+    if (orderData.buyerId) {
+      const buyerRef = db.collection("users").doc(orderData.buyerId);
+      const buyerSnap = await buyerRef.get();
+
+      if (buyerSnap.exists) {
+        const buyerData = buyerSnap.data();
+        const fcmToken = buyerData.fcmToken;
+
+        if (fcmToken) {
+          const title = "Order Shipped";
+          const body = `Your order with ID ${orderId} has been shipped.`;
+          await sendNotification(fcmToken, title, body);
+        } else {
+          console.warn("Buyer does not have an FCM token.");
+        }
+      }
+    }
+
+    return res.status(200).json({
+      status: true,
+      message: "Order status updated to shipped",
+    });
+  } catch (error) {
+    console.error("Error updating order status:", error);
+    return res.status(500).json({
+      status: false,
+      message: error.message,
+    });
+  }
+};
+
+/**
+ @description ship the ordder
+ @route  GET /api/order/order/:id
+ @Access Private
+ */
+module.exports.orderShipped = async (req, res) => {
+  const { orderId } = req.params;
+
+  try {
+    if (!orderId) {
+      return res.status(400).json({
+        status: false,
+        message: "Order ID is required",
+      });
+    }
+
+    const orderRef = db.collection("orders").doc(orderId);
+    const orderSnap = await orderRef.get();
+
+    if (!orderSnap.exists) {
+      return res.status(404).json({
+        status: false,
+        message: "Order not found",
+      });
+    }
+
+    const orderData = orderSnap.data();
+
+    console.log(orderData.buyerId);
+    // Update the order status to "shipped"
+    await orderRef.update({
+      status: "shipped",
+    });
+
+    // Send notification to the buyer
+    if (orderData.buyerId) {
+      const buyerRef = db.collection("users").doc(orderData.buyerId);
+      const buyerSnap = await buyerRef.get();
+
+      if (buyerSnap.exists) {
+        const buyerData = buyerSnap.data();
+        const fcmToken = buyerData.pushToken;
+
+        if (fcmToken) {
+          const title = "Order Shipped";
+          const body = `Your order with ID ${orderId} has been shipped.`;
+          await sendNotification(fcmToken, title, body);
+        } else {
+          console.warn("Buyer does not have an FCM token.");
+        }
+      }
+    }
+    return res.status(200).json({
+      status: true,
+      message: "Order status updated to shipped",
+      orderStatus: orderData.status,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      status: false,
+      message: error.message,
+    });
+  }
+};
+
+/**
+ @description change the status to complete
+ @route  GET /api/order/complete-order/:orderId
+ @Access Private
+ */
+module.exports.completeOrder = async (req, res) => {
+  const { orderId } = req.params;
+
+  try {
+    if (!orderId) {
+      return res.status(400).json({
+        status: false,
+        message: "Order ID is required",
+      });
+    }
+
+    const orderRef = db.collection("orders").doc(orderId);
+    const orderSnap = await orderRef.get();
+
+    if (!orderSnap.exists) {
+      return res.status(404).json({
+        status: false,
+        message: "Order not found",
+      });
+    }
+
+    const orderData = orderSnap.data();
+
+    console.log(orderData.buyerId);
+    // Update the order status to "shipped"
+    await orderRef.update({
+      status: "complete",
+    });
+
+    // Send notification to the buyer
+    if (orderData.buyerId) {
+      const buyerRef = db.collection("users").doc(orderData.buyerId);
+      const buyerSnap = await buyerRef.get();
+
+      if (buyerSnap.exists) {
+        const buyerData = buyerSnap.data();
+        const fcmToken = buyerData.pushToken;
+
+        if (fcmToken) {
+          const title = "Order Shipped";
+          const body = `Your order with ID ${orderId} has been arrived.`;
+          await sendNotification(fcmToken, title, body);
+        } else {
+          console.warn("Buyer does not have an FCM token.");
+        }
+      }
+    }
+    return res.status(200).json({
+      status: true,
+      message: "Order status updated to arrived",
+      orderStatus: orderData.status,
+    });
+  } catch (error) {
+    return res.status(500).json({
+      status: false,
+      message: error.message,
     });
   }
 };
