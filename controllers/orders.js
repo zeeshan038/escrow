@@ -10,7 +10,7 @@ const { db } = require("../config/firebase");
  @Access Private
  */
 module.exports.getOrders = async (req, res) => {
-  const { userId, type, status } = req.query;
+  const { userId, type, status, search } = req.query;
 
   try {
     if (!userId || !type) {
@@ -36,8 +36,16 @@ module.exports.getOrders = async (req, res) => {
     }
 
     // Filter by Status
+    // Filter by Status
     if (status) {
-      query = query.where("status", "==", status);
+      let statusArray = [];
+
+      if (status === "shipped" || status === "held") {
+        statusArray = ["shipped", "held"];
+        query = query.where("status", "in", statusArray);
+      } else {
+        query = query.where("status", "==", status);
+      }
     }
 
     // Fetch Orders
@@ -115,6 +123,16 @@ module.exports.getOrders = async (req, res) => {
       })
     );
 
+    if (search) {
+      const searchLower = search.toLowerCase();
+      ordersData = ordersData.filter(
+        (order) =>
+          order.firstName?.toLowerCase().includes(searchLower) ||
+          order.shippingMethod?.toLowerCase().includes(searchLower) ||
+          order.additionalDetails?.toLowerCase().includes(searchLower)
+      );
+    }
+
     return res.status(200).json({
       status: true,
       ordersData,
@@ -185,7 +203,19 @@ module.exports.getSpecificOrder = async (req, res) => {
       seller: sellerData,
       adPost: adData,
     };
-
+    const status = orderData.status; 
+    if (status === "dispuute"){
+      const disputeRef = db.collection("disputes").doc(orderData.disputeId);
+      const disputeSnap = await disputeRef.get();
+      if (disputeSnap.exists) {
+        const disputeData = disputeSnap.data();
+        orderData.disputeDetails = {
+          reason: disputeData.reason,
+          description: disputeData.description,
+          status: disputeData.status,
+        };
+      }
+    } 
     return res.status(200).json({
       status: true,
       orderData,
@@ -231,71 +261,7 @@ module.exports.orderShipped = async (req, res) => {
       status: "shipped",
     });
 
-    // Send notification to the buyer
-    if (orderData.buyerId) {
-      const buyerRef = db.collection("users").doc(orderData.buyerId);
-      const buyerSnap = await buyerRef.get();
-
-      if (buyerSnap.exists) {
-        const buyerData = buyerSnap.data();
-        const fcmToken = buyerData.fcmToken;
-
-        if (fcmToken) {
-          const title = "Order Shipped";
-          const body = `Your order with ID ${orderId} has been shipped.`;
-          await sendNotification(fcmToken, title, body);
-        } else {
-          console.warn("Buyer does not have an FCM token.");
-        }
-      }
-    }
-
-    return res.status(200).json({
-      status: true,
-      message: "Order status updated to shipped",
-    });
-  } catch (error) {
-    console.error("Error updating order status:", error);
-    return res.status(500).json({
-      status: false,
-      message: error.message,
-    });
-  }
-};
-
-/**
- @description ship the ordder
- @route  GET /api/order/order/:id
- @Access Private
- */
-module.exports.orderShipped = async (req, res) => {
-  const { orderId } = req.params;
-
-  try {
-    if (!orderId) {
-      return res.status(400).json({
-        status: false,
-        message: "Order ID is required",
-      });
-    }
-
-    const orderRef = db.collection("orders").doc(orderId);
-    const orderSnap = await orderRef.get();
-
-    if (!orderSnap.exists) {
-      return res.status(404).json({
-        status: false,
-        message: "Order not found",
-      });
-    }
-
-    const orderData = orderSnap.data();
-
-    console.log(orderData.buyerId);
-    // Update the order status to "shipped"
-    await orderRef.update({
-      status: "shipped",
-    });
+    console.log("status", orderData.status);
 
     // Send notification to the buyer
     if (orderData.buyerId) {
@@ -315,12 +281,16 @@ module.exports.orderShipped = async (req, res) => {
         }
       }
     }
+
+    orderData.status = "shipped";
+
     return res.status(200).json({
       status: true,
       message: "Order status updated to shipped",
       orderStatus: orderData.status,
     });
   } catch (error) {
+    console.error("Error updating order status:", error);
     return res.status(500).json({
       status: false,
       message: error.message,
@@ -335,7 +305,6 @@ module.exports.orderShipped = async (req, res) => {
  */
 module.exports.completeOrder = async (req, res) => {
   const { orderId } = req.params;
-
   try {
     if (!orderId) {
       return res.status(400).json({
@@ -382,7 +351,7 @@ module.exports.completeOrder = async (req, res) => {
     }
     return res.status(200).json({
       status: true,
-      message: "Order status updated to arrived",
+      message: "Order status updated to complete",
       orderStatus: orderData.status,
     });
   } catch (error) {

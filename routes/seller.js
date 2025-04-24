@@ -2,10 +2,11 @@
 const router = require("express").Router();
 
 // controllers
-const { createSellerAccount,  checkSellerStatus, sellerKYC, addBank, getAccounts, deleteBankAccount, setDefaultBankAccount} = require("../controllers/seller");
+const { createSellerAccount,  checkSellerStatus, sellerKYC, addBank, getAccounts, deleteBankAccount, setDefaultBankAccount, updateSellerDescription} = require("../controllers/seller");
 
 router.post("/create-seller" , createSellerAccount);
 router.post("/kyc" , sellerKYC);
+router.post("/update-desc" , updateSellerDescription);
 router.post("/add-bank" , addBank);
 router.post("/kyc-status" , checkSellerStatus);
 router.get("/accounts/:accId" , getAccounts);

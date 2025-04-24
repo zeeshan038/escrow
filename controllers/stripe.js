@@ -1,6 +1,7 @@
 //NPM Packages
 const dotenv = require("dotenv");
 dotenv.config();
+const uuid = require("uuid").v4;
 
 //Stripe
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
@@ -169,7 +170,9 @@ module.exports.chargeCard = async (req, res) => {
     if (!buyerId || !sellerId || !amount || !adId) {
       return res.status(400).json({ error: "Missing required fields" });
     }
-
+    if(buyerId === sellerId){
+      return res.status(400).json({ error: "Buyer and seller cannot be the same" });
+    }
     const buyerRef = admin.firestore().collection("users").doc(buyerId);
     const buyerDoc = await buyerRef.get();
 
@@ -178,6 +181,7 @@ module.exports.chargeCard = async (req, res) => {
     }
 
     const stripeCustomerId = buyerDoc.data().stripeCustomerId;
+    console.log("stripeCustomerId", stripeCustomerId);
     if (!stripeCustomerId) {
       return res
         .status(400)
@@ -208,18 +212,35 @@ module.exports.chargeCard = async (req, res) => {
       currency: "usd",
       customer: stripeCustomerId,
       payment_method: paymentMethodId,
-      confirm: false, // Do not confirm yet
-      capture_method: "manual", // Hold funds in escrow
+      confirm: false, 
+      capture_method: "manual",
       transfer_group: `order_${buyerId}_${adId}`,
       automatic_payment_methods: {
-        enabled: true, // Enable automatic payment methods
+        enabled: true, 
         allow_redirects: "never",
       },
     });
 
+     const totalPrice = amount + shippingPrice;
+     const trxId = generateShortOrderId();
+
+     const adRef = admin.firestore().collection("adPosts").doc(adId);
+     const adDoc = await adRef.get();
+ 
+     if (!adDoc.exists) {
+       return res.status(404).json({ error: "Ad not found" });
+     }
+ 
+     const adData = adDoc.data();
+     const thumbnailImage = adData.adImgUrl;
+     console.log("thumbnailImage", thumbnailImage);
+
     // Save order data to Firestore
     const orderRef = admin.firestore().collection("orders").doc();
+    const orderId = orderRef.id;
     await orderRef.set({
+      orderId, 
+      trxId,
       firstName,
       lastName,
       email,
@@ -234,7 +255,9 @@ module.exports.chargeCard = async (req, res) => {
       lat,
       long,
       paymentIntentId: paymentIntent.id,
-      status: "pending", // Set to pending until payment is confirmed and captured
+      image : thumbnailImage , 
+      status: "pending", 
+      totalPrice,
       createdAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
@@ -242,7 +265,7 @@ module.exports.chargeCard = async (req, res) => {
       message: "Payment Intent created, awaiting confirmation",
       orderId: orderRef.id,
       paymentIntentId: paymentIntent.id,
-      client_secret: paymentIntent.client_secret, // Send this to the client for payment confirmation
+      client_secret: paymentIntent.client_secret
     });
   } catch (error) {
     console.error("Payment Error:", error);
@@ -286,12 +309,18 @@ module.exports.confirmPayment = async (req, res) => {
       capturedAt: admin.firestore.FieldValue.serverTimestamp(),
     });
 
-    const sellerPushToken = orderData.sellerPushToken;
+    const sellerId = orderData.sellerId;
+    
+    const userRef = admin.firestore().collection("users").doc(sellerId);
+    const userSnapshot = await userRef.get();
+
+    const sellerData = userSnapshot.data();
+    const sellerPushToken = sellerData.pushToken;
     if (sellerPushToken) {
       await sendNotification(
         sellerPushToken,
         "Order Paid Successfully! 💰",
-        `The payment of $${orderData.amount} for order ${orderData.id} has been successfully captured.`
+        `buyer paid successfully!`
       );
     }
 
@@ -310,71 +339,74 @@ module.exports.confirmPayment = async (req, res) => {
    @route POST /api/stripe/transfer-money
    @access Private
  */
-
-module.exports.releasePayment = async (req, res) => {
-  const staticStripeConnectId = "acct_1Qz3k6PFPFCRQouh";
-  console.log("🔥 Using Static Stripe Connect ID:", staticStripeConnectId);
-
-  const account = await stripe.accounts.retrieve(staticStripeConnectId);
-  console.log("🔥 Retrieved Stripe Account:", account);
-  const { orderId } = req.body;
-  const COMMISSION_RATE = 0.05;
-
-  try {
-    const orderRef = db.collection("orders").doc(orderId);
-    const orderDoc = await orderRef.get();
-
-    if (!orderDoc.exists || orderDoc.data().status !== "held") {
-      return res
-        .status(400)
-        .json({ error: "Order not found or already processed" });
+   module.exports.releasePayment = async (req, res) => {
+    const { orderId } = req.body;
+    const COMMISSION_RATE = 0.05;
+  
+    try {
+      const orderRef = db.collection("orders").doc(orderId);
+      const orderDoc = await orderRef.get();
+  
+      if (!orderDoc.exists || orderDoc.data().status !== "held") {
+        return res.status(400).json({ error: "Order not found or already processed" });
+      }
+  
+      const order = orderDoc.data();
+      const { sellerId, paymentIntentId } = order;
+  
+      const sellerRef = db.collection("users").doc(sellerId);
+      const sellerDoc = await sellerRef.get();
+  
+      if (!sellerDoc.exists || !sellerDoc.data().stripeSellerId) {
+        return res.status(400).json({ error: "Seller does not have a Stripe Connect account" });
+      }
+  
+      const sellerStripeAccountId = sellerDoc.data().stripeSellerId;
+  
+      // Retrieve PaymentIntent to check status
+      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
+  
+      if (paymentIntent.status === "requires_capture") {
+        await stripe.paymentIntents.capture(paymentIntentId);
+      } else if (paymentIntent.status === "succeeded") {
+        console.log("PaymentIntent already captured");
+      } else {
+        return res.status(400).json({ error: "PaymentIntent not ready for capture" });
+      }
+  
+      // Calculate commission and seller earnings
+      const commission = Math.round(order.amount * COMMISSION_RATE);
+      const sellerEarnings = order.amount - commission;
+  
+      const transfer = await stripe.transfers.create({
+        amount: sellerEarnings * 100,
+        currency: "usd",
+        destination: sellerStripeAccountId,
+        transfer_group: `order_${order.buyerId}_${order.adId}`,
+      });
+  
+      await orderRef.update({
+        status: "completed",
+        transferId: transfer.id,
+        commissionDeducted: commission,
+        finalAmount: sellerEarnings,
+        completedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+  
+      res.status(200).json({ message: "Payment released successfully" });
+    } catch (error) {
+      console.error("Error releasing payment:", error.message);
+      res.status(500).json({ error: error.message });
     }
-    const order = orderDoc.data();
-    const sellerId = order.sellerId;
-    const paymentIntentId = order.paymentIntentId;
-
-    const sellerRef = db.collection("users").doc(sellerId);
-    const sellerDoc = await sellerRef.get();
-
-    await stripe.paymentIntents.capture(paymentIntentId);
-
-    // calculate commission
-    const commission = Math.round(order.amount * COMMISSION_RATE);
-    const sellerEarnings = order.amount - commission;
-
-    const transfer = await stripe.transfers.create({
-      amount: sellerEarnings * 100,
-      currency: "usd",
-      destination: "acct_1Qz3k6PFPFCRQouh",
-      transfer_group: `order_${order.buyerId}_${order.adId}`,
-    });
-
-    // Update order status in Firestore
-    await orderRef.update({
-      status: "completed",
-      transferId: transfer.id,
-      commissionDeducted: commission,
-      finalAmount: sellerEarnings,
-      completedAt: admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    res.status(200).json({
-      message: "Funds released to seller's Stripe Connect account",
-      transferId: transfer.id,
-      commissionDeducted: commission,
-      finalAmount: sellerEarnings,
-    });
-  } catch (error) {
-    res.status(500).json({ error: error });
-  }
-};
+  };
+  
+  
 
 /**
    @description dispute order
    @route POST /api/stripe/dispute-order
    @access Private
  */
-
 module.exports.dispute = async (req, res) => {
   const { orderId, buyerId, reason, vidUrl } = req.body;
 

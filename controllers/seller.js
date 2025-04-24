@@ -1,7 +1,6 @@
 // NPM Package
 const stripe = require("stripe")(process.env.STRIPE_SECRET_KEY);
 const axios = require("axios");
-const FormData = require("form-data");
 
 //firebase
 const { admin } = require("../config/firebase");
@@ -18,9 +17,10 @@ module.exports.createSellerAccount = async (req, res) => {
     const userDoc = await userRef.get();
 
     if (!userDoc.exists) {
-      return res
-        .status(404)
-        .json({ success: false, message: "User not found." });
+      return res.status(404).json({
+        success: false,
+        message: "User not found.",
+      });
     }
 
     const account = await stripe.accounts.create({
@@ -31,6 +31,10 @@ module.exports.createSellerAccount = async (req, res) => {
       capabilities: {
         card_payments: { requested: true },
         transfers: { requested: true },
+      },
+      tos_acceptance: {
+        date: Math.floor(Date.now() / 1000),
+        ip: req.ip,                    
       },
     });
 
@@ -44,7 +48,10 @@ module.exports.createSellerAccount = async (req, res) => {
       message: "Account created successfully!",
     });
   } catch (error) {
-    return res.status(500).json({ success: false, error: error.message });
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
   }
 };
 
@@ -64,7 +71,7 @@ module.exports.sellerKYC = async (req, res) => {
       email,
       phone,
       address,
-      business_url,
+      description,
       frontUrl,
       backUrl,
       userId,
@@ -112,7 +119,7 @@ module.exports.sellerKYC = async (req, res) => {
           month: dob.month,
           year: dob.year,
         },
-        id_number,
+        id_number, 
         email,
         phone,
         address: {
@@ -129,17 +136,17 @@ module.exports.sellerKYC = async (req, res) => {
           },
         },
       },
-      business_type: "individual",
-      business_profile: {
-        mcc: "5734",
-        url: business_url,
-      },
       tos_acceptance: {
         date: Math.floor(Date.now() / 1000),
         ip: req.ip,
       },
+      business_profile: {
+        product_description: description , 
+        support_email: email,
+        mcc: "5734"
+      },
     });
-
+    
     await admin.firestore().collection("payment_methods").doc(userId).set({
       stripeSellerId,
       status: "pending",
@@ -154,6 +161,40 @@ module.exports.sellerKYC = async (req, res) => {
     });
   } catch (error) {
     res.status(400).json({ status: false, error: error.message });
+  }
+};
+
+/**
+ * @description Update only the business description for a seller
+ * @route  POST /api/seller/update-description
+ * @access Private
+ */
+module.exports.updateSellerDescription = async (req, res) => {
+  try {
+    const { stripeSellerId, description } = req.body;
+
+    if (!stripeSellerId || !description) {
+      return res.status(400).json({
+        success: false,
+        message: "stripeSellerId and description are required.",
+      });
+    }
+
+    await stripe.accounts.update(stripeSellerId, {
+      business_profile: {
+        product_description: description,
+      },
+    });
+
+    return res.json({
+      success: true,
+      message: "Business description updated successfully.",
+    });
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: error.message,
+    });
   }
 };
 
@@ -249,7 +290,10 @@ module.exports.checkSellerStatus = async (req, res) => {
 
   try {
     const account = await stripe.accounts.retrieve(stripeSellerId);
-    const isVerified = account.requirements.currently_due.length === 0;
+    const requirements = account.requirements || {};
+    const isVerified = requirements.currently_due?.length === 0;
+
+    // Update seller in Firestore
     const sellerSnapshot = await admin
       .firestore()
       .collection("payment_methods")
@@ -263,6 +307,7 @@ module.exports.checkSellerStatus = async (req, res) => {
         message: "Seller not found in Firestore!",
       });
     }
+
     const sellerRef = sellerSnapshot.docs[0].ref;
     await sellerRef.update({
       status: isVerified ? "verified" : "restricted",
@@ -272,10 +317,20 @@ module.exports.checkSellerStatus = async (req, res) => {
     res.json({
       status: true,
       verificationStatus: isVerified ? "Verified" : "Restricted",
-      currentlyDue: account.requirements.currently_due,
+      currentlyDue: requirements.currently_due || [],
+      eventuallyDue: requirements.eventually_due || [],
+      pastDue: requirements.past_due || [],
+      disabledReason: account.disabled_reason || null,
+      payoutsEnabled: account.payouts_enabled,
+      chargesEnabled: account.charges_enabled,
+      capabilities: account.capabilities,
     });
   } catch (error) {
-    res.status(500).json({ status: false, error: error.message });
+    res.status(500).json({
+      status: false,
+      message: "Failed to check seller status.",
+      error: error.message,
+    });
   }
 };
 
